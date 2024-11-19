@@ -1,0 +1,75 @@
+stages:
+  - build
+  - test
+  - deploy
+
+# Build Docker image
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:24.0.5-dind
+  tags:
+    - alpha
+  environment:
+    name: dev
+  variables:
+    DOCKER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    #APP_PORT: 8080  # Default port; override as needed
+  script:
+    - CI_REGISTRY_HTTP=$(echo $CI_REGISTRY | sed 's/^https:/http:/')
+    - docker build --build-arg APP_PORT=$APP_PORT -t $DOCKER_IMAGE .
+    - echo $CI_REGISTRY_HTTP
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $DOCKER_IMAGE
+
+# Run tests (here we just use `docker run` to check if the container works)
+test:
+  stage: test
+  image: docker:latest
+  services:
+    - docker:24.0.5-dind
+  tags:
+    - alpha
+  environment:
+    name: dev
+  variables:
+    DOCKER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+    #APP_PORT: 8080
+  script:
+    - echo $APP_PORT
+    - docker run -d --name test_app -p $APP_PORT:$APP_PORT -e APP_PORT=$APP_PORT $DOCKER_IMAGE
+    - sleep 5
+    - curl -f http://localhost:$APP_PORT || exit 1
+    - docker stop test_app && docker rm test_app
+
+# Deploy to remote server using SSH
+deploy:
+  stage: deploy
+  image: docker:latest
+  services:
+    - docker:24.0.5-dind
+  tags:
+    - alpha
+  environment:
+    name: dev
+  variables:
+    DEPLOY_SERVER: $DEPLOY_SERVER  # Server to deploy to (set this in GitLab CI/CD variables)
+    DEPLOY_USER: $DEPLOY_USER      # SSH user (set this in GitLab CI/CD variables)
+    #APP_PORT: 8989               # Default port; override as needed
+    DOCKER_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  script:
+    - CI_REGISTRY_HTTP=$(echo $CI_REGISTRY | sed 's/^https:/http:/')
+    # Run Docker commands over SSH to the deploy server
+    - echo "Deploying to server $DEPLOY_SERVER"
+    - chmod 600 $SSH_PRIVATE_KEY
+    - |
+      ssh -o StrictHostKeyChecking=no -i $SSH_PRIVATE_KEY $DEPLOY_USER@$DEPLOY_SERVER << EOF
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+        docker pull $DOCKER_IMAGE
+        docker stop app || true
+        docker rm app || true
+        docker run -d --name app -p $APP_PORT:$APP_PORT -e APP_PORT=$APP_PORT $DOCKER_IMAGE
+      EOF
+  only:
+    - /^alpha\..*/  # This ensures the job only runs for tags like alpha.*, e.g., alpha.1, alpha.2, etc.
